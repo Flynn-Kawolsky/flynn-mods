@@ -1,0 +1,13 @@
+{
+  "name": "flynn-mods",
+  "description": "Claude Code desktop mods by Flynn-Kawolsky",
+  "owner": { "name": "Flynn-Kawolsky" },
+  "plugins": [
+    {
+      "name": "flynn-buddy",
+      "source": "./flynn-buddy",
+      "description": "Side pane: an owl that reacts to session state, plus token and cost per session",
+      "author": { "name": "Flynn-Kawolsky" }
+    }
+  ]
+}
