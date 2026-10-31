@@ -5,9 +5,9 @@ import type { Buddy, Mem, Mood } from '../types'
 
 const PANE = 'flynn-buddy'
 const BACKGROUND = new Set(['Agent', 'Workflow'])
-const MEM0: Mem = { ok: null, version: '', updateChecked: '', projects: [], recent24: 0, latest: '', reads: 0, writes: 0, errors: 0, lastMs: 0, checkedAt: 0 }
+const MEM0: Mem = { ok: null, version: '', updateChecked: '', projects: [], recent24: 0, latest: '', reads: 0, writes: 0, errors: 0, lastMs: 0, checkedAt: 0, err: '' }
 const buddy = atom({ plugin: 'flynn-buddy', key: 'buddy' } as const, { mood: 'calm', running: 0, note: '', pct: 0, left: 0, mem: MEM0 } as Buddy, {
-  shape: 'buddy-3',
+  shape: 'buddy-5',
 })
 
 // Basic Memory: the engine's own MCP connection, read-only calls. Tool calls of this session are counted as they pass.
@@ -15,10 +15,17 @@ const BM = 'basic-memory'
 const BM_TOOL = 'mcp__basic-memory__'
 const BM_WRITES = new Set(['write_note', 'edit_note', 'delete_note', 'move_note', 'create_memory_project', 'delete_project'])
 const BM_EVERY_MS = 5 * 60 * 1000
+// The probe's own calls pass through tool.call too; they are not the user's reads and must not make the owl frown.
+let probing = 0
 async function bmCall($: EngineInterface, tool: string, args: Record<string, unknown>): Promise<any> {
-  const r = await $.mcp.call(BM, tool, args)
+  let r
+  try {
+    r = await $.mcp.call(BM, tool, args)
+  } catch (err) {
+    throw new Error(`${tool}: ${String(err)}`)
+  }
   const text = r.content?.find(c => c.type === 'text')?.text ?? ''
-  if (r.isError) throw new Error(text)
+  if (r.isError) throw new Error(`${tool}: ${text}`)
   try {
     const j = JSON.parse(text)
     return j?.result ?? j
@@ -29,6 +36,7 @@ async function bmCall($: EngineInterface, tool: string, args: Record<string, unk
 // One probe: projects and their note counts, 24h activity, latest note; the version only once per session.
 async function probeMemory($: EngineInterface, mem: Mem): Promise<Mem> {
   const t0 = await $.clock.now()
+  probing++
   try {
     const list = await bmCall($, 'list_memory_projects', { output_format: 'json' })
     const names: string[] = (list.projects ?? []).map((p: { name: string }) => p.name)
@@ -41,9 +49,11 @@ async function probeMemory($: EngineInterface, mem: Mem): Promise<Mem> {
       version = diag.match(/basic-memory:\s*([\d.]+)/)?.[1] ?? '?'
       updateChecked = diag.match(/"auto_update_last_checked_at":\s*"([\d-]+)/)?.[1] ?? ''
     }
-    return { ...mem, ok: true, version, updateChecked, projects, recent24: items.length, latest: items[0]?.title ?? '', lastMs: (await $.clock.now()) - t0, checkedAt: await $.clock.now() }
-  } catch {
-    return { ...mem, ok: false, lastMs: (await $.clock.now()) - t0, checkedAt: await $.clock.now() }
+    return { ...mem, ok: true, err: '', version, updateChecked, projects, recent24: items.length, latest: items[0]?.title ?? '', lastMs: (await $.clock.now()) - t0, checkedAt: await $.clock.now() }
+  } catch (err) {
+    return { ...mem, ok: false, err: String(err).slice(0, 200), lastMs: (await $.clock.now()) - t0, checkedAt: await $.clock.now() }
+  } finally {
+    probing--
   }
 }
 
@@ -225,7 +235,7 @@ const lamp = (ok: boolean | null) =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" fill="${ok === true ? '#4eaa7a' : ok === false ? '#d95d5d' : '#8a8a8a'}"/></svg>`
 const DIVIDER = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 40"><rect width="1" height="40" fill="#8a8a8a" fill-opacity="0.4"/></svg>'
 const total = (m: Mem) => m.projects.reduce((n, p) => n + p.notes, 0)
-const MEM_STATE = (m: Mem) => (m.ok === true ? '正常' : m.ok === false ? '連線失敗' : '尚未讀取')
+const MEM_STATE = (m: Mem) => (m.ok === true ? '正常' : m.ok === false ? (/refused|denied/i.test(m.err ?? '') ? '未獲授權' : '連線失敗') : '尚未讀取')
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -241,7 +251,8 @@ export const register: Register = on => {
   // Bookkeeping only, not a guard: if it throws, the tool's own result stands.
   on('tool.call', async ($, e, next) => {
     const isBackground = BACKGROUND.has(e.tool)
-    const bmTool = e.tool.startsWith(BM_TOOL) ? e.tool.slice(BM_TOOL.length) : ''
+    const own = probing > 0 && e.tool.startsWith(BM_TOOL)
+    const bmTool = !own && e.tool.startsWith(BM_TOOL) ? e.tool.slice(BM_TOOL.length) : ''
     if (isBackground) await update($, buddy, b => ({ ...b, running: b.running + 1, mood: 'busy' }))
     const t0 = bmTool ? await $.clock.now() : 0
     const ran = await next(e)
@@ -255,7 +266,7 @@ export const register: Register = on => {
         mem: { ...b.mem, reads: b.mem.reads + (write ? 0 : 1), writes: b.mem.writes + (write ? 1 : 0), errors: b.mem.errors + (failed ? 1 : 0), lastMs: ms },
       }))
     }
-    if (ran.deny !== undefined || ran.isError === true)
+    if (!own && (ran.deny !== undefined || ran.isError === true))
       await update($, buddy, b => ({ ...b, mood: 'frown', note: `${e.tool} ${ran.deny ? '被擋' : '失敗'}` }))
     return ran
   }).catch(($, e, next) => next(e))
@@ -308,9 +319,10 @@ export const register: Register = on => {
         <Text bold>Basic Memory</Text>
         <Box flexDirection="row" alignItems="center" gap="xs">
           {Svg && <Svg source={lamp(m.ok)} alt={`連線${MEM_STATE(m)}`} width={8} height={8} />}
-          <Text color={m.ok === false ? 'error' : undefined}>連線{MEM_STATE(m)}</Text>
+          <Text color={m.ok === false ? 'error' : undefined}>{MEM_STATE(m)}</Text>
           {m.lastMs > 0 && <Text dimColor tabular>· 上次 {(m.lastMs / 1000).toFixed(1)} 秒</Text>}
         </Box>
+        {m.ok === false && <Text dimColor>原因：{m.err || '（未記到）'}</Text>}
         <Text tabular>筆記 {m.ok === true ? total(m) : '—'} 則</Text>
         {m.projects.length > 1 && <Text dimColor tabular>{m.projects.map(p => `${p.name} ${p.notes}`).join(' · ')}</Text>}
         <Text tabular>24 小時新增或修改 {m.recent24} 則</Text>
@@ -334,9 +346,9 @@ export const register: Register = on => {
     const m = b.mem
     const u = await $.session.usage()
     return (
-      <Box flexDirection="row" alignItems="center" gap="sm">
+      <Box flexDirection="row" alignItems="center" gap="sm" width="100%" flexWrap="wrap">
         {Svg && <Svg source={owl(b.mood)} alt={`墨墨：${LABEL[b.mood]}`} width={80} height={72} isInteractive />}
-        <Box flexDirection="column" gap="xs">
+        <Box flexDirection="column" gap="xs" flexGrow={1} flexShrink={1}>
           <Text weight="semibold" color={TONE[b.mood]}>
             {b.mood === 'frown' && b.note !== '' ? b.note : `${LABEL[b.mood]}${b.note !== '' ? ` · ${b.note}` : ''}`}
           </Text>
@@ -348,7 +360,7 @@ export const register: Register = on => {
           </Box>
         </Box>
         {Svg && <Svg source={DIVIDER} alt="" width={1} height={40} />}
-        <Box flexDirection="column" gap="xs">
+        <Box flexDirection="column" gap="xs" alignItems="flex-end">
           <Box flexDirection="row" alignItems="center" gap="xs">
             {Svg && <Svg source={lamp(m.ok)} alt={`Basic Memory ${MEM_STATE(m)}`} width={8} height={8} />}
             <Text weight="medium" color={m.ok === false ? 'error' : undefined}>

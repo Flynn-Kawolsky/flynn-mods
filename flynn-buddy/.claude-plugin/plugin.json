@@ -1,1 +1,1 @@
-{ "name": "flynn-buddy", "version": "0.2.0", "description": "Side pane: an owl that reacts to session state, plus token and cost per session", "types": "./types/index.d.ts" }
+{ "name": "flynn-buddy", "version": "0.2.1", "description": "Side pane: an owl that reacts to session state, plus token and cost per session", "types": "./types/index.d.ts" }

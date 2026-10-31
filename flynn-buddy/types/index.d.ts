@@ -11,6 +11,7 @@ export type Mem = {
   errors: number
   lastMs: number
   checkedAt: number
+  err?: string
 }
 export type Buddy = { mood: Mood; running: number; note: string; pct: number; left: number; mem: Mem }
 
